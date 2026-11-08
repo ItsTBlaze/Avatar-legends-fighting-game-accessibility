@@ -26,10 +26,19 @@ the game.
 During fights it only reads tutorial instructions. Fight audio cues (distance to the
 opponent, health and so on) are planned.
 
-## Using it
+## Install
 
-Download the latest zip from the [Releases](../../releases) page when one is available,
-unzip it, and open **Avatar Reader.exe**. Nothing needs installing.
+1. Download **[AvatarReader.zip](https://github.com/ItsTBlaze/avatar-legends-fighting-game-accessibility/raw/main/download/AvatarReader.zip)**.
+   This link always gets the newest version (currently 0.1.0).
+2. Unzip it anywhere, for example into Documents.
+3. Open the unzipped **Avatar Reader** folder and run **Avatar Reader**. Nothing needs
+   installing. Windows may ask whether to run a program from an unknown publisher:
+   choose **More info**, then **Run anyway**.
+4. You will hear "Avatar reader" followed by the version number and "started". Then
+   start the game. You can also start the reader after the game.
+
+To update, download the new zip and unzip it over the old folder (quit the reader
+first with Ctrl+Shift+Q).
 
 ### Hotkeys
 
@@ -77,3 +86,5 @@ Open an issue describing the screen and what was said. If you can, attach
 NVDA's controller library (in `lib`) is from NV Access, under the GNU LGPL 2.1, via the
 [accessible_output2](https://github.com/accessibleapps/accessible_output2) project.
 See `share/LICENSES.txt`.
+
+Avatar Reader is released under the MIT License (see `LICENSE`).

@@ -25,6 +25,7 @@ if exist dist rmdir /s /q dist
 if errorlevel 1 goto fail
 copy /y "share\README.txt" "dist\Avatar Reader\README.txt" >nul
 copy /y "share\LICENSES.txt" "dist\Avatar Reader\LICENSES.txt" >nul
+if exist LICENSE copy /y LICENSE "dist\Avatar Reader\LICENSE.txt" >nul
 
 echo Step 3 of 4: testing the packaged program on your screenshots.
 rem Find this computer's Steam screenshots for the game (for the self test).

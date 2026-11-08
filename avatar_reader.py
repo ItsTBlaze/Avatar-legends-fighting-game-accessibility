@@ -36,6 +36,7 @@ from ocr import make_ocr        # noqa: E402
 from reader import Reader       # noqa: E402
 from speech import Speaker      # noqa: E402
 
+VERSION = "0.1.0"
 POLL_SECONDS = 0.12
 BLACK_WARN_SECONDS = 10
 
@@ -45,7 +46,7 @@ def selftest(folder):
     with open(out_path, "w", encoding="utf-8") as out:
         try:
             ocr = make_ocr()
-            out.write("OCR engine: %s\n" % ocr.name)
+            out.write("Avatar Reader %s\nOCR engine: %s\n" % (VERSION, ocr.name))
             reader = Reader(ocr)
             files = sorted(glob.glob(os.path.join(folder, "*.jpg")) + glob.glob(os.path.join(folder, "*.png")))
             out.write("Screenshots: %d\n" % len(files))
@@ -91,7 +92,7 @@ class App:
     def run(self):
         import mss
         self.hotkeys()
-        self.speaker.say("Avatar reader started. Control shift Q to quit.")
+        self.speaker.say("Avatar reader %s started. Control shift Q to quit." % VERSION)
         black_since = None
         warned_black = False
         with mss.mss() as sct:
