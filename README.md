@@ -62,7 +62,9 @@ first with Ctrl+Shift+Q).
 2. Open **Start Avatar Reader.bat**. The first run sets up its parts, which takes a few minutes.
 3. **Run self test.bat** checks the reader against your Steam screenshots of the game
    (take some with F12) and writes the results to `selftest.txt`.
-4. **Make shareable copy.bat** builds the standalone `Avatar Reader.zip`.
+4. **Make shareable copy.bat** builds the standalone `AvatarReader.zip`, next to the
+   batch file. To save it somewhere else, put that folder's path on the first line of a
+   file named `output_folder.txt` beside the batch file.
 
 ### How it works
 

@@ -9,3 +9,4 @@ dist/
 selftest.txt
 packaged_selftest.txt
 build_log.txt
+output_folder.txt

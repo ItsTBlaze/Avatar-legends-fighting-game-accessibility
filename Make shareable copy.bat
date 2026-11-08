@@ -38,12 +38,20 @@ if exist "%SHOTS%" (
 )
 
 echo Step 4 of 4: making the zip file.
-if exist "Avatar Reader.zip" del "Avatar Reader.zip"
-powershell -NoProfile -Command "Compress-Archive -Path 'dist\Avatar Reader' -DestinationPath 'Avatar Reader.zip' -Force" >> build_log.txt 2>&1
+rem The zip goes next to this file, or to the folder named in output_folder.txt if that file exists.
+set "OUT=%~dp0."
+if exist "output_folder.txt" set /p OUT=<"output_folder.txt"
+if not exist "%OUT%\" (
+  echo The folder in output_folder.txt was not found, so the zip is saved here instead.
+  set "OUT=%~dp0."
+)
+if exist "%OUT%\AvatarReader.zip" del "%OUT%\AvatarReader.zip"
+powershell -NoProfile -Command "Compress-Archive -Path 'dist\Avatar Reader' -DestinationPath (Join-Path $env:OUT 'AvatarReader.zip') -Force" >> build_log.txt 2>&1
 if errorlevel 1 goto fail
 
 echo.
-echo Done. The file to share is Avatar Reader.zip, in this folder.
+echo Done. The file to share is AvatarReader.zip, saved in:
+echo %OUT%
 echo Press any key to close this window.
 pause >nul
 exit /b 0
