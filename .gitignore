@@ -1,0 +1,11 @@
+# Created on each computer, not part of the code
+venv/
+__pycache__/
+build/
+dist/
+*.spec
+*.zip
+*.log
+selftest.txt
+packaged_selftest.txt
+build_log.txt

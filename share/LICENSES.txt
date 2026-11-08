@@ -1,0 +1,16 @@
+Avatar Reader is a fan-made accessibility tool. It is not affiliated with or
+endorsed by the makers of Avatar Legends: The Fighting Game, Paramount or
+Avatar Studios. It contains no game files or artwork.
+
+Included third-party software:
+
+NVDA Controller Client (lib folder: nvdaControllerClient32.dll and
+nvdaControllerClient64.dll)
+Copyright NV Access Limited. Licensed under the GNU Lesser General Public
+License, version 2.1. Source: https://github.com/nvaccess/nvda
+Obtained via the accessible_output2 project (MIT license),
+https://github.com/accessibleapps/accessible_output2
+
+Python, NumPy, OpenCV, mss, keyboard, comtypes and the Python/WinRT
+packages are bundled inside the program. Each is distributed under its own
+open-source license (PSF, BSD, Apache 2.0 or MIT).
