@@ -64,14 +64,17 @@ def crop(img, region):
 
 def orange_mask(img):
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
     # Hue up to 13 keeps the bright highlight orange but not the brown buttons
     # on the controller settings panel (hue 15).
-    return (((h <= 13) | (h >= 172)) & (s >= 130) & (v >= 125)).astype(np.uint8)
+    low = cv2.inRange(hsv, (0, 130, 125), (13, 255, 255))
+    high = cv2.inRange(hsv, (172, 130, 125), (180, 255, 255))
+    return (cv2.bitwise_or(low, high) > 0).astype(np.uint8)
 
 
 def black_mask(img):
-    return (img.max(axis=2) < 30).astype(np.uint8)
+    b, g, r = cv2.split(img)
+    brightest = cv2.max(cv2.max(b, g), r)          # much faster than numpy's max over colors
+    return (brightest < 30).astype(np.uint8)
 
 
 def white_text_mask(img):
@@ -102,6 +105,21 @@ def ocr_ready(img, scale=2):
     m = cv2.GaussianBlur(m, (3, 3), 0)
     out = 255 - m
     return cv2.copyMakeBorder(out, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255)
+
+
+def ocr_ready_alt(img, scale=3):
+    """A second try for a box nothing was read from: plain grey levels with
+    the edges trimmed (brush ends and button corners), dark text on white,
+    bigger. Thin lettering that the first try broke up often survives this."""
+    h, w = img.shape[:2]
+    g = cv2.cvtColor(img[h // 7: h - h // 7, w // 14: w - w // 14], cv2.COLOR_BGR2GRAY)
+    if g.size == 0:
+        return ocr_ready(img)
+    if g.mean() < 128:
+        g = 255 - g                  # light letters on a dark brush: flip them
+    g = cv2.resize(g, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    _, out = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return cv2.copyMakeBorder(out, 30, 30, 30, 30, cv2.BORDER_CONSTANT, value=255)
 
 
 def _boxes(mask, kernel, min_w, min_h, max_h, top=40):
@@ -136,6 +154,19 @@ def find_highlights(img, fighting=False):
             if np.count_nonzero(white_text_mask(crop(img, box))) < 300:
                 continue
             found.append(("black", box))
+    if not found:
+        # Over bright fire (the results screen after a match) the see-through
+        # orange brush looks more yellow; try once more allowing that.
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        warm = (cv2.inRange(hsv, (0, 170, 150), (18, 255, 255)) > 0).astype(np.uint8)
+        for x, y, w, h, area in _boxes(warm, (9, 5), 220, 36, 170, top):
+            box = (x, y, x + w, y + h)
+            if np.count_nonzero(white_text_mask(crop(img, box))) < 150:
+                continue
+            found.append(("orange", box))
+    # The button prompt strip along the bottom of training ("Pause,
+    # (Hold All) Reset") looks like a black highlight but isn't a menu.
+    found = [f for f in found if not (f[0] == "black" and f[1][1] >= 940)]
     found.sort(key=lambda b: (b[1][1], b[1][0]))
     return found
 
@@ -143,15 +174,134 @@ def find_highlights(img, fighting=False):
 def in_match(img):
     """True while a fight is on screen and not dimmed by a pause menu.
 
-    Checks the inner ends of the health bars (orange for P1, blue for P2)
-    and the dark centre of the round timer between them.
+    Checks the inner ends of the health bars (orange, or yellow when low, for
+    P1; blue for P2) and the dark centre of the round timer between them.
     """
-    p1 = orange_mask(crop(img, P1_HEALTH_END)).mean()
-    hsv = cv2.cvtColor(crop(img, P2_HEALTH_END), cv2.COLOR_BGR2HSV)
-    p2 = ((hsv[..., 0] >= 105) & (hsv[..., 0] <= 130) & (hsv[..., 1] >= 120) & (hsv[..., 2] >= 150)).mean()
+    hsv1 = cv2.cvtColor(crop(img, P1_HEALTH_END), cv2.COLOR_BGR2HSV).astype(int)
+    h, s, v = hsv1[..., 0], hsv1[..., 1], hsv1[..., 2]
+    p1 = (((h <= 35) | (h >= 165)) & (s >= 120) & (v >= 120)).mean()
+    hsv = cv2.cvtColor(crop(img, P2_HEALTH_END), cv2.COLOR_BGR2HSV).astype(int)
+    p2 = ((hsv[..., 0] >= 105) & (hsv[..., 0] <= 130) & (hsv[..., 1] >= 60) & (hsv[..., 2] >= 140)).mean()
     emblem = crop(img, (935, 70, 985, 140))
     dark = (emblem.max(axis=2) < 60).mean()
-    return (p1 > 0.5 or p2 > 0.5) and dark > 0.55
+    return (p1 > 0.5 or p2 > 0.5) and dark > 0.45
+
+
+# Local VS controller setup, just before character select: each controller
+# sits in the middle and moves left to Player 1 or right to Player 2.
+CTRL_SLOTS = {0: (530, 450, 680, 555), 1: (1165, 450, 1315, 555)}
+CTRL_SLOT_TEXT = {0: (560, 470, 650, 530), 1: (1195, 470, 1285, 530)}
+CTRL_CENTER = {1: (910, 550, 1010, 615), 2: (910, 635, 1010, 700)}
+
+
+def _hsv(img, box):
+    hsv = cv2.cvtColor(crop(img, box), cv2.COLOR_BGR2HSV).astype(int)
+    return hsv[..., 0], hsv[..., 1], hsv[..., 2]
+
+
+def controller_setup(img):
+    h, s, v = _hsv(img, CTRL_SLOTS[0])
+    red = (((h <= 10) | (h >= 165)) & (s >= 80) & (v >= 60)).mean()
+    h, s, v = _hsv(img, CTRL_SLOTS[1])
+    blue = ((h >= 105) & (h <= 130) & (s >= 80) & (v >= 60)).mean()
+    if red < 0.4 or blue < 0.4:
+        return False
+    above = crop(img, (870, 445, 1050, 530)).max(axis=2)
+    h, s, v = _hsv(img, (300, 240, 1620, 330))
+    cream = ((s <= 110) & (v >= 120)).mean()
+    return (above < 70).mean() > 0.6 and cream > 0.6
+
+
+def controller_in_middle(img, n):
+    h, s, v = _hsv(img, CTRL_CENTER[n])
+    return ((s <= 50) & (v >= 200)).mean() > 0.35
+
+
+def slot_text_width(img, side):
+    """Width of the white lettering on a Player slot: wide for "CPU",
+    narrow for a controller number."""
+    h, s, v = _hsv(img, CTRL_SLOT_TEXT[side])
+    ys, xs = np.nonzero((v >= 190) & (s <= 110))
+    return int(xs.max() - xs.min()) if len(xs) > 20 else 0
+
+
+# The versus screen after picking: a big gold "VS" in the middle of the bottom.
+VS_EMBLEM = (860, 800, 1060, 1010)
+VS_STAGE = (580, 85, 1340, 145)          # the stage name across the top
+
+
+def versus_screen(img):
+    hsv = cv2.cvtColor(crop(img, VS_EMBLEM), cv2.COLOR_BGR2HSV)
+    gold = cv2.inRange(hsv, (12, 45, 120), (38, 255, 255))
+    # The gold letters sit on a dark round badge; a golden sky has no dark.
+    dark = (hsv[..., 2] < 70).mean()
+    return cv2.countNonZero(gold) >= 12000 and dark >= 0.25
+
+
+# Arcade mode select: the fighter grid, with three difficulty buttons on the
+# right (green Novice, yellow Intermediate, red Expert).
+ARCADE_BUTTONS = (("Novice", (1340, 262, 1765, 334), (35, 75)),
+                  ("Intermediate", (1340, 400, 1765, 472), (18, 34)),
+                  ("Expert", (1340, 538, 1765, 610), (0, 12)))
+
+
+def arcade_select(img):
+    for _, box, (h1, h2) in ARCADE_BUTTONS:
+        h, s, v = _hsv(img, box)
+        if (((h >= h1) & (h <= h2)) & (s >= 70) & (v >= 80)).mean() < 0.5:
+            return False
+    return True
+
+
+def arcade_difficulty(img):
+    """The difficulty button that stands out (brighter than the other two),
+    or None while none is picked out."""
+    bright = []
+    for name, (x1, y1, x2, y2), _ in ARCADE_BUTTONS:
+        h, s, v = _hsv(img, (x1 - 12, y1 - 12, x2 + 12, y2 + 12))
+        bright.append((float(v.mean()), name))
+    bright.sort(reverse=True)
+    return bright[0][1] if bright[0][0] - bright[1][0] > 12 else None
+
+
+# A white popup card in the middle of the screen ("Leave the lobby?").
+def popup_card(img):
+    small = img[::2, ::2]
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+    m = cv2.inRange(hsv, (0, 0, 215), (180, 40, 255))
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    n, _, stats, _ = cv2.connectedComponentsWithStats(m)
+    for i in range(1, n):
+        x, y, w, h, area = (int(v) for v in stats[i])
+        cx, cy = (x + w / 2) * 2, (y + h / 2) * 2
+        if 200 <= w <= 500 and h >= 75 and area >= 0.6 * w * h and 700 <= cx <= 1220 and 200 <= cy <= 850:
+            card = cv2.cvtColor(small[y:y + h, x:x + w], cv2.COLOR_BGR2GRAY)
+            paper = card[card > 150]
+            # A real card is flat white paper with dark writing; a glow fades.
+            if paper.size and paper.std() < 12 and (card < 100).mean() > 0.005:
+                return (x * 2, y * 2, (x + w) * 2, (y + h) * 2)
+    return None
+
+
+def timer_running(img):
+    """A real match shows a countdown (tall digits) in the round timer;
+    training and tutorials show a short, wide infinity sign instead."""
+    part = crop(img, (905, 55, 1015, 150))
+    hsv = cv2.cvtColor(part, cv2.COLOR_BGR2HSV)
+    m = ((hsv[..., 2] >= 170) & (hsv[..., 1] <= 90)).astype(np.uint8)
+    n, _, stats, _ = cv2.connectedComponentsWithStats(m)
+    return any(40 <= stats[i][3] <= 65 and stats[i][2] <= 45 and stats[i][4] >= 300 for i in range(1, n))
+
+
+# Dialogue before a fight: a line at the top with the speaker's portrait on
+# the right, and a reply at the bottom with the portrait on the left.
+INTRO_TOP = (90, 100, 1330, 240)
+INTRO_TOP_NAME = (1690, 250, 1890, 310)
+INTRO_BOTTOM = (590, 800, 1700, 940)
+INTRO_BOTTOM_NAME = (40, 950, 220, 1015)
+
+# Big round announcements in the middle of the screen ("ROUND 2", "FINISH").
+ANNOUNCE_REGION = (420, 380, 1500, 720)
 
 
 def charsel_layout(img):

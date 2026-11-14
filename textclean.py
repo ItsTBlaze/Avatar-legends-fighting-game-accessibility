@@ -22,6 +22,8 @@ def clean(text):
             (len(words[0]) == 1 and not (words[0].isalpha() and words[0].isupper()))
             or (len(words[0]) == 2 and not words[0].isupper())):
         words.pop(0)
+    if len(words) == 1 and words[0].strip(".,!?").lower() in ("no", "ok", "on", "go"):
+        return words[0].strip(".,")         # a real short word on its own (the No button)
     while words and len(words[-1]) <= 2 and not words[-1].isdigit() and not words[-1].isupper():
         words.pop()
     text = " ".join(words)

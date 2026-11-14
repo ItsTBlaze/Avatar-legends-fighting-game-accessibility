@@ -5,6 +5,7 @@ import re
 import logging
 import cv2
 import detector as d
+import fight
 import inputs
 import textclean as tc
 
@@ -61,9 +62,38 @@ def match_roster(text):
     return None
 
 
+def announcement(text):
+    """What a round call says, from text recognition that may be rough
+    (the letters are big, brushed and outlined)."""
+    t = text.upper()
+    m = re.search(r"(?<![A-Z])R\W?[O0@®Q]\W?[UO0]?\W?N\W?D\W*(\d)?", t)
+    if m:
+        if "FINAL" in t:
+            return "Final round"
+        return "Round %s" % m.group(1) if m.group(1) else None    # wait until the number is read
+    if re.search(r"BALAN|MUST\s*BE|RESTOR", t):
+        return "Balance must be restored. Fight!"
+    if re.search(r"E\s?R\s?F\s?E|RFEC|EREEC", t):
+        return "Perfect"
+    if re.search(r"[I1L]N[I1L]S|INISH|FINIS", t):
+        return "Finish"
+    m = re.search(r"(.*?)\bW\W?[I1L]\W?N\W?[S5]\b", t)
+    if m:
+        name = match_roster(m.group(1)) if m.group(1).strip() else None
+        return "%s wins" % name if name else "Round over"
+    if re.search(r"\bTIME\b", t):
+        return "Time"
+    if re.search(r"\bDRAW\b", t):
+        return "Draw"
+    return None
+
+
 class Reader:
-    def __init__(self, ocr):
+    def __init__(self, ocr, player=None, settings=None):
         self.ocr = ocr
+        self.settings = settings
+        self.fight = fight.FightCues(ocr, player, settings)
+        self.last_img = None
         self.mode = None            # 'menu', 'charsel', 'match', 'none'
         self.scene = None
         self.spoken_items = ()
@@ -83,7 +113,15 @@ class Reader:
         if key not in cache:
             if len(cache) > 300:
                 cache.clear()
-            cache[key] = tc.clean(self.ocr.text(prepared, scale=2))
+            text = tc.clean(self.ocr.text(prepared, scale=2))
+            if sum(c.isalpha() for c in text) < 2:
+                # Nothing came out: try again with the box prepared another way.
+                text = tc.clean(self.ocr.text(d.ocr_ready_alt(d.crop(img, box)), scale=3)) or text
+            if sum(c.isalpha() for c in text) < 2:
+                # Nothing readable (often the highlight was still sweeping in):
+                # don't remember that, so the next look reads it again.
+                return text
+            cache[key] = text
         return cache[key]
 
     def read_gray(self, img, region, scale=2):
@@ -128,17 +166,69 @@ class Reader:
 
     # ---- main entry --------------------------------------------------
     def process(self, img):
+        said = self._process(img)
+        # Never read the training button-hint strip ("Pause ... (Hold All) Reset").
+        return [s for s in said if not re.search(r"(?i)hold\W*al+i?\W*reset", s[0])]
+
+    def _process(self, img):
         """Return a list of (text, interrupt) to speak for this frame."""
         self.tick += 1
         img = d.normalize(img)
+        self.last_img = img
+        # A new screen: forget the "read only every few frames" shortcuts so
+        # everything on it is read straight away.
+        thumb = cv2.resize(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), (32, 18), interpolation=cv2.INTER_AREA)
+        prev = getattr(self, "thumb", None)
+        if prev is not None and cv2.absdiff(thumb, prev).mean() > 20:
+            self.__dict__.pop("_last_read", None)
+        self.thumb = thumb
 
         fighting = d.in_match(img)
+        if fighting:
+            # An assist or effect can hide the timer for a moment; only a real
+            # break (a pause, the next round) of 2 seconds or more counts as a
+            # new fight, so combos being read aren't lost.
+            gap = self.tick - getattr(self, "fight_seen", -999)
+            if gap > 25:
+                self.fight.reset()
+            self.fight_seen = self.tick
+        announced = []          # round calls ("Round 2", "Finish") aren't read
+        if fighting:
+            if d.timer_running(img):
+                # A real match: no menus or tutorial text can show while the
+                # clock runs, so skip looking for them (much less work).
+                self.mode = "fight"
+                return announced + self.fight.update(img)
+            # Training or a tutorial. While a training menu is open over the
+            # fight, its changes (life, characters) mustn't set off fight sounds.
+            boxes = d.find_highlights(img, fighting)
+            said = [] if boxes else self.fight.update(img)
+            return announced + said + self._menu(img, fighting, boxes)
+        if d.controller_setup(img):
+            return self._controllers(img)
+        if not fighting and d.arcade_select(img):
+            return self._arcade(img)
         self.charsel = (not fighting) and d.charsel_layout(img)
+        if (not fighting and not self.charsel and self.tick - getattr(self, "charsel_seen", -9999) <= 200
+                and d.versus_screen(img)):
+            return self._versus(img)
+        if self.charsel:
+            self.charsel_seen = self.tick
+        elif self.tick - getattr(self, "charsel_seen", -9999) <= 600:
+            said = self._intro(img)         # the fighters' lines before round 1
+            if said is not None:
+                return said
+        if not fighting and not self.charsel:
+            asked = self._popup(img)
+            if asked:
+                return asked
         if self.charsel:
             # Stage select has the same Player 1 / Player 2 banners; the heading
             # says CHARACTER SELECT there, or the stage name here.
             heading = self.top_heading(img)
-            if heading and "CHARACTER" not in heading.upper() and "SELECT" not in heading.upper():
+            # Stage names are long; a few stray letters are a screen fading out.
+            if (sum(c.isalpha() for c in heading) >= 5 and "CHARACTER" not in heading.upper()
+                    and "SELECT" not in heading.upper()):
                 return self._stage(img, heading)
             return self._charsel(img)
         return self._menu(img, fighting)
@@ -149,9 +239,13 @@ class Reader:
         cache = self.__dict__.setdefault("_cache", {})
         key = ("heading", sig)
         if key not in cache:
+            recent = self._recent_read("heading", 3)
+            if recent is not None:
+                return recent
             text = tc.clean(self.ocr.text(d.bright_text(part, v=170, s=120), scale=2))
             words = [w for w in text.split() if len(w) > 2 or w.isupper()]
             cache[key] = " ".join(words)
+            self._remember_read("heading", cache[key])
         return cache[key]
 
     def _stage(self, img, heading):
@@ -191,6 +285,9 @@ class Reader:
         cache = self.__dict__.setdefault("_cache", {})
         if key in cache:
             return cache[key]
+        recent = self._recent_read(("name", region))
+        if recent is not None:
+            return recent
         raw = []
         name = None
         for im, scale in self._name_images(img, region):
@@ -203,6 +300,7 @@ class Reader:
             name = "?" + next((t for t in raw if t), "")   # unmatched: raw reading
         log.info("name region %s read %r -> %r", region, raw, name)
         cache[key] = name
+        self._remember_read(("name", region), name)
         return name
 
     def fighter_name(self, img, side):
@@ -234,6 +332,9 @@ class Reader:
         cache = self.__dict__.setdefault("_cache", {})
         if key in cache:
             return cache[key]
+        recent = self._recent_read(("extra", region, main), 5)
+        if recent is not None:
+            return recent
         hsv = cv2.cvtColor(part, cv2.COLOR_BGR2HSV)
         mask = ((hsv[..., 2] >= 175) & (hsv[..., 1] <= 170)).astype("uint8") * 255
         mask = 255 - cv2.GaussianBlur(mask, (3, 3), 0)
@@ -267,7 +368,29 @@ class Reader:
         extra = ", ".join(parts)
         log.info("extra region %s read %r", region, extra)
         cache[key] = extra
+        self._remember_read(("extra", region, main), extra)
         return extra
+
+    # The character art behind these names keeps moving, so the picture is
+    # never quite the same twice. Reading it again on every frame made the
+    # reader lag; a few times a second is plenty.
+    def _every(self, key, ticks, read):
+        """Read again only every few frames; in between, the last reading.
+        Text recognition is by far the slowest step, and screen text that
+        isn't the highlight (headings, timers, status lines) changes slowly."""
+        recent = self._recent_read(("every", key), ticks)
+        if recent is not None:
+            return recent
+        value = read()
+        self._remember_read(("every", key), value)
+        return value
+
+    def _recent_read(self, key, ticks=4):
+        tick, value = self.__dict__.setdefault("_last_read", {}).get(key, (-99, None))
+        return value if self.tick - tick < ticks else None
+
+    def _remember_read(self, key, value):
+        self.__dict__.setdefault("_last_read", {})[key] = (self.tick, value)
 
     def _settled(self, key, value, frames=3):
         """value once it has been read the same way `frames` times in a row."""
@@ -296,7 +419,7 @@ class Reader:
             self.prefix = "Character select"
             self.__dict__["_settle"] = {}
         changed = []
-        status = self._bright(img, d.CHARSEL_STATUS)
+        status = self._every("status", 6, lambda: self._bright(img, d.CHARSEL_STATUS))
         status = tc.speakable(tc.clean(status))
         if len(status.split()) < 2 or sum(c.isalpha() for c in status) < 8:
             status = ""         # "Searching for players", "Waiting for everyone to accept"
@@ -305,7 +428,7 @@ class Reader:
             if status and not tc.same(status, getattr(self, "status", "")):
                 changed.append(status)
             self.status = status
-        timer = re.sub(r"\D", "", self._bright(img, d.CHARSEL_TIMER))
+        timer = re.sub(r"\D", "", self._every("timer", 3, lambda: self._bright(img, d.CHARSEL_TIMER)))
         if timer and timer != getattr(self, "timer", "") and timer.lstrip("0") in ("10", "5", "3"):
             changed.append("%s seconds" % timer.lstrip("0"))
         self.timer = timer
@@ -346,11 +469,179 @@ class Reader:
         return cache[key]
 
     # ---- tutorial instructions ---------------------------------------------
+    def _arcade(self, img):
+        """Arcade mode: pick a fighter on the grid, then a difficulty."""
+        out = []
+        if self.mode != "arcade":
+            self.mode = "arcade"
+            self.arcade_name = self.arcade_diff = None
+            self.arcade_intro = True
+        cell = d.grid_highlight(img)
+        name = self._settled("arcade_name", ("Random" if cell == "CENTER" else cell) if cell else None, 2)
+        if name and name != self.arcade_name:
+            self.arcade_name = name
+            out.append(("Arcade mode. Choose a fighter: %s" % name if self.arcade_intro else name, True))
+            self.arcade_intro = False
+        diff = self._settled("arcade_diff", d.arcade_difficulty(img), 3)
+        if diff and diff != self.arcade_diff:
+            out.append(("Difficulty, %s" % diff, not out))
+        if diff is not None or self.arcade_diff is None:
+            self.arcade_diff = diff or self.arcade_diff
+        return out
+
+    def _popup(self, img):
+        """Speak a popup's question ("Leave the lobby?") as soon as the card
+        appears, without waiting for its buttons to settle."""
+        card = d.popup_card(img)
+        if not card:
+            self.popup_q = None
+            return []
+        x1, y1, x2, y2 = card
+        part = d.crop(img, (x1 + 10, y1 + 10, x2 - 10, y2 - 50))   # above the buttons
+        sig = (cv2.resize(cv2.cvtColor(part, cv2.COLOR_BGR2GRAY), (40, 10)) // 32).tobytes()
+        cache = self.__dict__.setdefault("_cache", {})
+        if ("popup", sig) not in cache:
+            cache[("popup", sig)] = tc.clean_prose(self.ocr.text(d.dark_text(part), scale=2))
+        q = self._settled("popup", cache[("popup", sig)], 2)
+        if not q or sum(c.isalpha() for c in q) < 4 or q == getattr(self, "popup_q", None):
+            return []
+        self.popup_q = q
+        self.title = self.new_title = q      # so the menu doesn't say it again
+        return [(q, True)]
+
+    def _controllers(self, img):
+        """Local VS controller setup: which controller is on which side."""
+        middle = [n for n in (1, 2) if d.controller_in_middle(img, n)]
+        away = [n for n in (1, 2) if n not in middle]
+        sides = []
+        for side in (0, 1):
+            w = d.slot_text_width(img, side)
+            if w > 45:
+                sides.append("CPU")
+            elif w > 0:
+                digit = re.sub(r"\D", "", self._every(("ctrl", side), 4, lambda: self.ocr.text(
+                    d.bright_text(d.crop(img, d.CTRL_SLOT_TEXT[side]), v=190, s=110, scale=3), scale=3)))
+                if digit[:1] in ("1", "2"):
+                    n = int(digit[0])
+                elif len(away) == 1:
+                    n = away[0]
+                else:
+                    n = side + 1
+                sides.append("controller %d" % n)
+            else:
+                sides.append("empty")
+        state = self._settled("controllers", (tuple(sides), tuple(middle)), 2)
+        if state is None:
+            return []
+        prev = getattr(self, "ctrl_state", None)
+        if state == prev and self.mode == "controllers":
+            return []
+        self.ctrl_state = state
+        sides, middle = state
+        parts = []
+        for i, (name, was) in enumerate(zip(sides, prev[0] if prev and self.mode == "controllers" else (None, None))):
+            if name != was:
+                parts.append("Player %d, %s" % (i + 1, name))
+        if self.mode != "controllers":
+            self.mode = "controllers"
+            self.scene = None
+            mid = ("controllers 1 and 2 in the middle" if len(middle) == 2 else
+                   "controller %d in the middle" % middle[0] if middle else "")
+            text = "Controller setup. " + ". ".join(p for p in parts + [mid] if p)
+            text += ". Move left for Player 1, right for Player 2, then press accept."
+            return [(text, True)]
+        return [(". ".join(parts), True)] if parts else []
+
+    def _versus(self, img):
+        """The versus screen: the fighters were just read, so only the stage."""
+        if self.mode != "versus":
+            self.mode = "versus"
+            if getattr(self, "versus_for", None) != getattr(self, "charsel_seen", None):
+                self.versus_for = getattr(self, "charsel_seen", None)   # once per trip to character select
+                self.versus_said = False
+        if self.versus_said:
+            return []
+        part = d.crop(img, d.VS_STAGE)
+        sig = (cv2.resize(cv2.cvtColor(part, cv2.COLOR_BGR2GRAY), (48, 6)) // 24).tobytes()
+        cache = self.__dict__.setdefault("_cache", {})
+        if ("vs", sig) not in cache:
+            cache[("vs", sig)] = self._every("vs", 3, lambda: tc.speakable(tc.clean(
+                self.ocr.text(d.bright_text(part, v=170, s=120), scale=2))))
+        name = self._settled("versus", cache[("vs", sig)], 2)
+        if not name:
+            return []
+        self.versus_said = True
+        return [("Versus. Stage, %s" % name, True)]
+
+    def _intro(self, img):
+        """Pre-fight dialogue: a line at the top (speaker named at the right)
+        and a reply at the bottom (speaker named at the left). Letters appear
+        one at a time, so a line is read once it stops changing. Returns None
+        when no dialogue is showing."""
+        if self.tick % 2:
+            return [] if getattr(self, "intro_on", False) else None
+        found, out = False, []
+        for key, box, label in (("top", d.INTRO_TOP, d.INTRO_TOP_NAME),
+                                ("bottom", d.INTRO_BOTTOM, d.INTRO_BOTTOM_NAME)):
+            part = d.crop(img, box)
+            mask = d.text_on_dark(part) > 0
+            if mask.sum() < 800:
+                self._settled("intro_" + key, "", 1)
+                continue
+            sig = (cv2.resize(mask.astype("uint8") * 255, (80, 10)) // 64).tobytes()
+            cache = self.__dict__.setdefault("_cache", {})
+            if ("intro", sig) not in cache:
+                cache[("intro", sig)] = self._read_instruction(part)
+            text = cache[("intro", sig)]
+            if not text:
+                continue
+            found = True
+            text = self._settled("intro_" + key, text, 2)
+            spoken = self.__dict__.setdefault("intro_said", {})
+            before = spoken.get(key, "")
+            if not text or self._similar(text, before):
+                continue
+            spoken[key] = text
+            if before and text.lower().startswith(before.lower()[:-1]):
+                text = text[len(before):].strip(" .,")   # the rest of a line read early
+                if not text:
+                    continue
+            else:
+                name = match_roster(tc.clean(self.ocr.text(d.bright_text(d.crop(img, label), v=180, s=90), scale=2)))
+                if name:
+                    text = "%s: %s" % (name, text)
+            out.append((text, False))
+        self.intro_on = found
+        return out if found else None
+
+    def _announce(self, img):
+        """Round calls in big white letters: Round 2, Perfect, Finish, Ozai wins."""
+        if self.settings is not None and not self.settings["fight_sounds"]:
+            return []
+        if self.tick % 3:
+            return []                       # every third frame is plenty
+        part = d.crop(img, d.ANNOUNCE_REGION)
+        hsv = cv2.cvtColor(part, cv2.COLOR_BGR2HSV)
+        if ((hsv[..., 1] <= 25) & (hsv[..., 2] >= 240)).sum() < 45000:
+            return []                       # no big pure-white letters
+        lines = self.ocr.lines(d.bright_text(part, v=225, s=40, scale=1))
+        text = " ".join(l.text for l in lines).upper()
+        said = announcement(text)
+        if not said:
+            return []
+        last = self.__dict__.setdefault("_announced", {})
+        if self.tick - last.get(said, -999) < 60:
+            return []                       # already said for this round
+        last[said] = self.tick
+        return [(said, False)]
+
     def _instruction(self, img):
         """Tutorial text during play, with button icons spoken in place."""
+        if self.settings is not None and not self.settings["tutorial_text"]:
+            return []
         self.tick_i = getattr(self, "tick_i", 0) + 1
-        if self.tick_i % 2:
-            return []                       # every other frame is plenty
+        if self.tick_i % 4:
+            return []                       # tutorial text changes slowly: a few looks a second
         part = d.crop(img, d.INSTRUCTION_REGION)
         textpx = d.text_on_dark(part) > 0
         if textpx.sum() < 600:
@@ -388,9 +679,14 @@ class Reader:
         while words and sum(c.isalpha() for c in words[0]) < 3 and words[0] not in ("A", "B", "C", "I"):
             words.pop(0)        # specks before the first real word
         text = " ".join(words)
-        real = [w for w in words if sum(c.isalpha() for c in w) >= 3 or w in ("A", "B", "C", "a", "I")]
-        if len(real) < 4 or len(real) < 0.7 * len(words):
-            return ""           # not a sentence: effects or scenery
+        # A tutorial line is a sentence: mostly real words of 3+ letters. The
+        # training input display (button letters and frame numbers, like
+        # "A B C C B 11 14") and controller names must never count.
+        real = [w for w in words if sum(c.isalpha() for c in w) >= 3 and sum(c.isdigit() for c in w) == 0]
+        if len(real) < 4 or len(real) < 0.6 * len(words):
+            return ""           # not a sentence
+        if re.search(r"(?i)xbox|controller|playstation|keyboard|hold all|scaling", text):
+            return ""
         return text
 
     # ---- online screens ----------------------------------------------------
@@ -456,7 +752,10 @@ class Reader:
         cache = self.__dict__.setdefault("_cache", {})
         key = ("lobbycap", sig)
         if key not in cache:
-            cache[key] = "capacity" in self._bright(img, d.LOBBY_CAPACITY).lower()
+            # The art behind this corner moves, so its picture rarely repeats:
+            # look again at most every 8 frames.
+            return self._every("lobbycap", 8, lambda: cache.setdefault(
+                key, "capacity" in self._bright(img, d.LOBBY_CAPACITY).lower()))
         return cache[key]
 
     def lobby_info(self, img):
@@ -532,8 +831,9 @@ class Reader:
                 cache[key] = "%s. Input: %s" % (head, moves) if head else "Input: " + moves
         return cache[key]
 
-    def _menu(self, img, fighting=False):
-        boxes = d.find_highlights(img, fighting)
+    def _menu(self, img, fighting=False, boxes=None):
+        if boxes is None:
+            boxes = d.find_highlights(img, fighting)
         mode = "fight" if fighting else "menu"
         if self.mode != mode:
             self.mode = mode
@@ -566,8 +866,13 @@ class Reader:
         if lobby and "LOBBY" not in title.upper():
             title = "Custom Lobby"
         items = []
+        card = d.popup_card(img) if boxes and not fighting else None
         for style, box in boxes:
             text = self.read_box(img, box)
+            if card and sum(c.isalpha() for c in text) < 2 and card[1] < box[1] < card[3] + 60:
+                # A button on a question card whose word couldn't be read: on
+                # these popups Yes is always on the left and No on the right.
+                text = "Yes" if (box[0] + box[2]) / 2 < (card[0] + card[2]) / 2 else "No"
             if fighting and not tc.looks_like_words(text):
                 continue    # fire and sparks can look like a highlight mid-fight
             if lobby:
@@ -595,8 +900,10 @@ class Reader:
                 items.append(desc)
         items = tuple(items)
         if fighting and not items:
-            return self._instruction(img)
-        if not items and getattr(self, "empty_frames", 0) <= 8 and self.spoken_items:
+            # Tutorial text only shows in training and tutorials (no countdown);
+            # skipping it in real matches saves a lot of text recognition.
+            return [] if d.timer_running(img) else self._instruction(img)
+        if not items and getattr(self, "empty_frames", 0) <= 18 and self.spoken_items:
             self.empty_frames = getattr(self, "empty_frames", 0) + 1
             return []           # a flicker: keep everything as it was
         if items != self.candidate:          # wait one frame so animations settle
@@ -606,7 +913,7 @@ class Reader:
             # The highlight glow can flicker off for a frame or two; only treat
             # it as gone after about a second.
             self.empty_frames = getattr(self, "empty_frames", 0) + 1
-            if self.empty_frames > 8:
+            if self.empty_frames > 18:     # about a second and a half: really gone
                 self.spoken_items = ()
                 self.scene = None
             return []

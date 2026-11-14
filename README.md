@@ -21,15 +21,44 @@ the game.
   "Blue Spirit Liberation, 4 Energy, Hard Knockdown. Input: quarter circle forward, A plus B plus C".
 - **Online:** the lobby list, custom lobbies (settings, capacity, invite code, players, host,
   match slots), yes or no popups, the match-found popup, the pick timer and the results screen.
+- **Local VS controller setup:** which side each controller is on, and which side is the computer.
+- **Arcade mode:** the fighter you are choosing.
+- **Before a fight:** the stage on the versus screen and the fighters' lines, with who is speaking.
+- **Popups:** the question ("Leave the lobby?") as soon as it appears, then Yes or No.
 - **Tutorials:** the tutorial menu and the instruction text shown during a tutorial.
 
-During fights it only reads tutorial instructions. Fight audio cues (distance to the
-opponent, health and so on) are planned.
+## During fights
+
+- **Combos:** hits and damage when a combo ends, yours and your opponent's, for example
+  "4 hits, 150 damage" or "Opponent 2 hits, 128 damage".
+- **Flow gauge full:** a rising two-note chime when your Flow gauge refills after you used it.
+- **Energy:** a plucked note when you gain energy, higher for each level (1 to 7).
+- **Low health:** a two-tone alarm when your health or your opponent's drops to 30 percent,
+  higher for you and lower for your opponent. Once per fighter per round.
+
+Your sounds come from your side of the screen and your opponent's from theirs.
+
+## Accessibility menu
+
+Press **F3**, or click the right stick (**R3**) on a controller. With the keyboard, up and
+down move and left and right change a setting; with a controller, push the right stick.
+Escape, F3 or R3 closes it. It has: all fight sounds on or off, which player you are,
+combos, the health alert (you and your opponent, you only, or off), Flow and energy
+sounds, your opponent's Flow and energy sounds, tutorial instructions, and a separate
+volume for each kind of sound. Your choices are saved.
+
+### Custom sounds
+
+The reader makes a **Custom sounds** folder beside it. Put WAV files there named after the
+sound they replace: `health_low.wav`, `flow_full.wav`, `energy.wav` (or `energy_1.wav` to
+`energy_7.wav`). Add `_opponent` for your opponent's version, for example
+`health_low_opponent.wav`. New files are picked up when you open the accessibility menu.
+The folder has a text file with the full details.
 
 ## Install
 
 1. Download **[AvatarReader.zip](https://github.com/ItsTBlaze/avatar-legends-fighting-game-accessibility/raw/main/download/AvatarReader.zip)**.
-   This link always gets the newest version (currently 0.1.0).
+   This link always gets the newest version (currently 0.2.0).
 2. Unzip it anywhere, for example into Documents.
 3. Open the unzipped **Avatar Reader** folder and run **Avatar Reader**. Nothing needs
    installing. Windows may ask whether to run a program from an unknown publisher:
@@ -48,6 +77,12 @@ first with Ctrl+Shift+Q).
 | Ctrl+Shift+S | Read all the text on the screen |
 | Ctrl+Shift+P | Pause or resume automatic reading |
 | Ctrl+Shift+Q | Quit |
+| Ctrl+Shift+G | Hear health, Flow gauge and energy, yours and your opponent's |
+| Ctrl+Shift+D | Save a picture of the screen in the Saved screens folder, to share when something isn't read |
+| F3 | Accessibility menu (controller: R3) |
+
+The reader only reads while the game is the window in front, so it stays quiet in
+other programs.
 
 ### Game settings it needs
 
@@ -72,6 +107,11 @@ first with Ctrl+Shift+Q).
 | --- | --- |
 | `avatar_reader.py` | Main program: screen capture, hotkeys, self test |
 | `reader.py` | Decides what to say for each screen |
+| `fight.py` | Fight sounds and combo announcements |
+| `sounds.py` | Makes the sound cues and loads custom sounds |
+| `menu.py` | The accessibility menu and the controller shortcut |
+| `settings.py` | Saves the menu choices |
+| `hotkeys.py` | Shortcut keys through Windows (no keyboard hook) |
 | `detector.py` | Finds highlights, screens and fixed regions |
 | `ocr.py` | Text recognition with the OCR built into Windows |
 | `inputs.py` | Reads arrow and button icons in move inputs |
@@ -81,7 +121,8 @@ first with Ctrl+Shift+Q).
 ## Reporting problems
 
 Open an issue describing the screen and what was said. If you can, attach
-`avatar_reader.log` (in the program's folder) and a screenshot of the screen (F12 in Steam).
+`avatar_reader.log` (in the program's folder) and a picture of the screen: press
+Ctrl+Shift+D on it, and the picture is saved in the Saved screens folder.
 
 ## Credits
 
